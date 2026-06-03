@@ -11,8 +11,11 @@ from __future__ import annotations
 # v1.1  – Added semi-transparent density heatmap overlay (folium HeatMap
 #          plugin) groupable by Season, Intensity, Country, or
 #          State/Province; controlled via sidebar checkbox + dropdown.
+# v1.2  – Moved temperature toggle and debounce slider into Advanced sidebar
+#          section; moved Export CSV/XLSX buttons to sidebar; added Google
+#          Search link column to data table (date + area + admin area).
 # ---------------------------------------------------------------------------
-__version__ = "1.1"
+__version__ = "1.2"
 # ---------------------------------------------------------------------------
 
 import calendar
@@ -21,6 +24,7 @@ import math
 import re
 import sqlite3
 import time
+from urllib.parse import urlencode
 from collections.abc import Iterable
 from collections.abc import Sequence
 from datetime import datetime
@@ -1966,15 +1970,6 @@ def main() -> None:
 
     with st.sidebar:
         st.header("Filters")
-        use_fahrenheit = st.toggle("Show temperatures in °F", value=True)
-        temp_debounce_seconds = st.slider(
-            "Temperature viewport settle (seconds)",
-            min_value=1,
-            max_value=5,
-            value=3,
-            step=1,
-            help="Wait time after map resize/pan/zoom before temperature API checks refresh.",
-        )
         _density_group_options = {
             "Season": "SEASON",
             "Intensity": "INTENSITY_NORM",
@@ -2233,6 +2228,15 @@ def main() -> None:
         temp_scope_placeholder = st.empty()
         temp_coverage_placeholder = st.empty()
         with st.expander("Advanced", expanded=False):
+            use_fahrenheit = st.toggle("Show temperatures in °F", value=True)
+            temp_debounce_seconds = st.slider(
+                "Temperature viewport settle (seconds)",
+                min_value=1,
+                max_value=5,
+                value=3,
+                step=1,
+                help="Wait time after map resize/pan/zoom before temperature API checks refresh.",
+            )
             max_map_rows = st.slider(
                 "Map row limit",
                 min_value=100,
@@ -2481,25 +2485,41 @@ def main() -> None:
 
     visible_rows = min(len(display_df), 10)
     table_height = max(96, 34 * (visible_rows + 1))
-    with st.expander("Data table", expanded=True):
-        download_left, download_right = st.columns(2)
-        download_left.download_button(
+    with st.sidebar:
+        st.divider()
+        _exp_left, _exp_right = st.columns(2)
+        _exp_left.download_button(
             "Export CSV",
             data=to_csv_bytes(filtered),
             file_name="tornado_tracks.csv",
             mime="text/csv",
-            width="stretch",
+            use_container_width=True,
         )
-        download_right.download_button(
+        _exp_right.download_button(
             "Export XLSX",
             data=to_excel_bytes(filtered),
             file_name="tornado_tracks.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch",
+            use_container_width=True,
         )
+
+    with st.expander("Data table", expanded=True):
 
         # Add formatted length/width columns with units
         display_df = display_df.copy()
+
+        # Google search URL: date + area + admin area + "Tornado"
+        def _search_url(row: pd.Series) -> str:
+            date_str = (
+                row["BEGIN_DATE_TIME"].strftime("%B %#d, %Y")
+                if isinstance(row["BEGIN_DATE_TIME"], pd.Timestamp) and not pd.isnull(row["BEGIN_DATE_TIME"])
+                else str(row["BEGIN_DATE_TIME"])
+            )
+            query = " ".join(filter(None, [date_str, str(row.get("AREA_NAME", "")), str(row.get("ADMIN_AREA", "")), "Tornado"]))
+            return "https://www.google.com/search?" + urlencode({"q": query})
+
+        display_df["SEARCH_URL"] = display_df.apply(_search_url, axis=1)
+
         track_length_numeric = pd.to_numeric(display_df["TRACK_LENGTH"], errors="coerce")
         if track_length_numeric.notna().any():
             max_track_length = float(track_length_numeric.dropna().abs().max())
@@ -2547,6 +2567,7 @@ def main() -> None:
                 "TEMP_LOW",
                 "EVENT_NARRATIVE",
                 "SOURCE_DB",
+                "SEARCH_URL",
             ]
         ]
 
@@ -2588,6 +2609,7 @@ def main() -> None:
                 "TRACK_WIDTH": st.column_config.TextColumn("Track Width"),
                 "TEMP_HIGH": st.column_config.TextColumn("High Temp"),
                 "TEMP_LOW": st.column_config.TextColumn("Low Temp"),
+                "SEARCH_URL": st.column_config.LinkColumn("Search", display_text="🔍 Google"),
             },
         )
 

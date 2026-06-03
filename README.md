@@ -1,4 +1,4 @@
-# Tornado Map · v1.1
+# Tornado Map · v1.2
 
 A Streamlit app that displays historical tornado tracks on an interactive map using NOAA Storm Events data, with optional Canadian National Tornado Database support.
 
@@ -12,7 +12,8 @@ A Streamlit app that displays historical tornado tracks on an interactive map us
 - Temperature overlay showing daily high/low at each tornado start point (via Open-Meteo archive API); toggle °F / °C
 - Hover popups with tornado details (date, intensity, location, track length)
 - Map height is resizable via the sidebar slider
-- Filtered results exportable to CSV or XLSX from the Data table panel
+- **Google Search link** in the data table — each row has a clickable 🔍 Google link pre-filled with the event date, location, and "Tornado" for quick research
+- Filtered results exportable to CSV or XLSX directly from the sidebar
 - Local SQLite cache (`tornado_cache.db`) stores downloaded data for 7 days so the app loads instantly on repeat visits
 
 ## Quick start
@@ -32,8 +33,6 @@ The app opens at `http://localhost:8501`. Data is downloaded from NOAA on first 
 | Control | Type | Description |
 |---------|------|-------------|
 | **Locations** | Multi-select | Single combined selector for U.S. states and Canadian provinces/territories. Options are grouped under country headers (default: Great Lakes region). |
-| **Show temperatures in °F** | Toggle | Display temperature data in degrees Fahrenheit; off shows °C (default: on) |
-| **Temperature viewport settle** | Slider 1–5 s | How long to wait after a map pan/zoom before temperature data refreshes |
 | **Year range** | Slider | Select a start and end year; full NOAA record runs from 1950 to the current year |
 | **Months** | Checkboxes | Toggle individual months; options with no data are shown in light gray but remain selectable |
 | **Season** | Checkboxes | Toggle Spring / Summer / Fall / Winter; months and season checkboxes stay in sync, and no-data options appear in light gray |
@@ -47,12 +46,23 @@ The app opens at `http://localhost:8501`. Data is downloaded from NOAA on first 
 | **Group density by** | Dropdown | Select how to group tornado events for density visualization: Season (spring/summer/fall/winter hotspots), Intensity (F4/F5 clusters), Country (US vs Canada patterns), or State/Province (regional concentrations). Each group gets its own heatmap layer with color coding. |
 | **Map height (px)** | Slider 300–1400 | Drag to resize the map panel |
 
+### Export
+
+Below the filter controls a divider separates two compact buttons:
+
+| Button | Description |
+|--------|-------------|
+| **Export CSV** | Download the full filtered dataset as a CSV file |
+| **Export XLSX** | Download the full filtered dataset as an Excel workbook |
+
 ### Advanced (collapsed)
 
-Expand the **Advanced** section at the bottom of the sidebar to access performance options and the data refresh control.
+Expand the **Advanced** section at the bottom of the sidebar to access temperature settings, performance options, and the data refresh control.
 
 | Control | Type | Description |
 |---------|------|-------------|
+| **Show temperatures in °F** | Toggle | Display temperature data in degrees Fahrenheit; off shows °C (default: on) |
+| **Temperature viewport settle** | Slider 1–5 s | How long to wait after a map pan/zoom before temperature data refreshes |
 | **Map row limit** | Slider 100–5000 | Maximum tornado events rendered on the map at once (default: 2,000). ⚠️ Values above 2,000 may cause slow rendering or GPU driver crashes on some systems. |
 | **Refresh data from source** | Button | Marks all locally cached data as stale so it will be re-downloaded from NOAA / ECCC on the next filter change. Your current view, selections, and table contents are not affected. To discard all cached data entirely, delete `tornado_cache.db` from the project folder. |
 
@@ -70,7 +80,11 @@ Live metrics showing the number of tracks, states/provinces, countries, and year
 
 ## Data table
 
-The table below the map shows all tornadoes matching the current filters. Selected rows (from map clicks) appear at the top with a yellow highlight. Use the **Download** buttons inside the table panel to export the full filtered dataset as CSV or XLSX.
+The table below the map shows all tornadoes matching the current filters. Selected rows (from map clicks) appear at the top with a yellow highlight.
+
+Each row includes a **🔍 Google** link in the **Search** column that opens a Google search pre-filled with the event date, location, and admin area — useful for finding news reports or historical records about a specific tornado.
+
+Use the **Export CSV** / **Export XLSX** buttons in the sidebar to download the full filtered dataset.
 
 ## Local cache
 
