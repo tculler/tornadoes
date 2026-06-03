@@ -2519,11 +2519,18 @@ def main() -> None:
         st.error("Map dependency missing. Install `folium` and `streamlit-folium`.")
         return
 
+    persisted_view = st.session_state.get("_map_view_state")
+    if persisted_view is None:
+        persisted_view = find_map_view_state(
+            st.session_state.get("tornado_map", {}),
+            allow_bounds_fallback=True,
+        )
+
     fmap, view_lat, view_lon, view_zoom = build_map(
         filtered,
         selected_rows=selected_idxs,
         map_state=st.session_state.get("_last_map_state_for_view", st.session_state.get("tornado_map", {})),
-        persisted_view=st.session_state.get("_map_view_state"),
+        persisted_view=persisted_view,
         map_height=map_height,
         max_map_rows=max_map_rows,
         show_density_overlay=st.session_state.get("_show_density_overlay", False),
@@ -2534,7 +2541,7 @@ def main() -> None:
         "key": "tornado_map_widget",
         "height": map_height,
         "use_container_width": True,
-        "returned_objects": ["zoom", "center", "last_object_clicked"],
+        "returned_objects": ["zoom", "center", "bounds", "last_object_clicked"],
     }
     if _needs_pos:
         _st_folium_kwargs["center"] = (view_lat, view_lon)
@@ -2546,7 +2553,7 @@ def main() -> None:
         if new_click is not None:
             st.session_state["_last_clicked_raw"] = new_click
 
-        event_view = find_map_view_state(map_event, allow_bounds_fallback=False)
+        event_view = find_map_view_state(map_event, allow_bounds_fallback=True)
         if event_view is not None:
             old_view = st.session_state.get("_map_view_state")
             if old_view is None or (
