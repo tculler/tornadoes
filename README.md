@@ -1,4 +1,4 @@
-# Tornado Map · v1.2
+# Tornado Map · v1.3
 
 A Streamlit app that displays historical tornado tracks on an interactive map using NOAA Storm Events data, with optional Canadian National Tornado Database support.
 
@@ -14,6 +14,7 @@ A Streamlit app that displays historical tornado tracks on an interactive map us
 - Map height is resizable via the sidebar slider
 - **Google Search link** in the data table — each row has a clickable 🔍 Google link pre-filled with the event date, location, and "Tornado" for quick research
 - Filtered results exportable to CSV or XLSX directly from the sidebar
+- Apply-based sidebar filter forms reduce reruns while editing checkboxes/sliders
 - Local SQLite cache (`tornado_cache.db`) stores downloaded data for 7 days so the app loads instantly on repeat visits
 
 ## Quick start
@@ -35,8 +36,10 @@ The app opens at `http://localhost:8501`. Data is downloaded from NOAA on first 
 | **Locations** | Multi-select | Single combined selector for U.S. states and Canadian provinces/territories. Options are grouped under country headers (default: Great Lakes region). |
 | **Year range** | Slider | Select a start and end year; full NOAA record runs from 1950 to the current year |
 | **Months** | Checkboxes | Toggle individual months; options with no data are shown in light gray but remain selectable |
-| **Season** | Checkboxes | Toggle Spring / Summer / Fall / Winter; months and season checkboxes stay in sync, and no-data options appear in light gray |
+| **Season** | Checkboxes | Toggle Spring / Summer / Fall / Winter; no-data options appear in light gray |
 | **Intensity** | Checkboxes | Filter by EF rating (EF0–EF5) plus Unk for unrated events (default: EF3, EF4, EF5); no-data options appear in light gray |
+| **Apply scope filters** | Button | Applies density/year/location changes in one rerun |
+| **Apply detail filters** | Button | Applies months/season/intensity changes in one rerun |
 
 ### Display
 

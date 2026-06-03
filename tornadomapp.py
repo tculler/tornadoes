@@ -14,8 +14,12 @@ from __future__ import annotations
 # v1.2  – Moved temperature toggle and debounce slider into Advanced sidebar
 #          section; moved Export CSV/XLSX buttons to sidebar; added Google
 #          Search link column to data table (date + area + admin area).
+# v1.3  – Added Apply-based sidebar filter forms to reduce reruns during
+#          editing, cached multi-year/Canada loads, conditional loading
+#          spinner display, and viewport-signature gating for temperature
+#          refresh work while panning/zooming.
 # ---------------------------------------------------------------------------
-__version__ = "1.2"
+__version__ = "1.3"
 # ---------------------------------------------------------------------------
 
 import calendar
@@ -24,6 +28,7 @@ import math
 import re
 import sqlite3
 import time
+from contextlib import nullcontext
 from urllib.parse import urlencode
 from collections.abc import Iterable
 from collections.abc import Sequence
@@ -999,6 +1004,20 @@ def load_noaa_years(years: Iterable[int]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+@st.cache_data(show_spinner=False)
+def load_noaa_years_cached(years_key: tuple[int, ...], data_revision: int) -> pd.DataFrame:
+    """Memoize concatenated NOAA years to avoid rebuilds on non-filter reruns."""
+    _ = data_revision  # explicit key input to invalidate when refresh is requested
+    return load_noaa_years(years_key)
+
+
+@st.cache_data(show_spinner=False)
+def load_canadian_tornado_data_cached(data_revision: int) -> pd.DataFrame:
+    """Memoize Canadian dataset load while preserving manual refresh invalidation."""
+    _ = data_revision  # explicit key input to invalidate when refresh is requested
+    return load_canadian_tornado_data()
+
+
 def fetch_remote_csv(url: str) -> pd.DataFrame:
     response = requests.get(url, timeout=120)
     response.raise_for_status()
@@ -1968,69 +1987,121 @@ def main() -> None:
     current_year = pd.Timestamp.now("UTC").year
     year_start, year_end = default_year_range()
 
+    _density_group_options = {
+        "Season": "SEASON",
+        "Intensity": "INTENSITY_NORM",
+        "Country": "COUNTRY",
+        "State/Province": "ADMIN_AREA",
+    }
+    location_options, location_token_to_area = build_grouped_location_options(
+        COUNTRY_ADMIN_AREAS,
+        COUNTRY_REGIONS,
+    )
+    default_locations = [
+        token for token in ["__REGION__::United States::Great Lakes"] if token in location_options
+    ]
+
+    # Applied scope filters drive data loading. Draft controls live in the form
+    # and only become active when the user clicks Apply.
+    if "_scope_year_range" not in st.session_state:
+        st.session_state["_scope_year_range"] = (year_start, year_end)
+    if "_scope_location_tokens" not in st.session_state:
+        st.session_state["_scope_location_tokens"] = default_locations
+    if "_scope_show_density" not in st.session_state:
+        st.session_state["_scope_show_density"] = False
+    if "_scope_density_group_option" not in st.session_state:
+        st.session_state["_scope_density_group_option"] = "Season"
+
+    if "_draft_scope_year_range" not in st.session_state:
+        st.session_state["_draft_scope_year_range"] = st.session_state["_scope_year_range"]
+    if "_draft_scope_location_tokens" not in st.session_state:
+        st.session_state["_draft_scope_location_tokens"] = st.session_state["_scope_location_tokens"]
+    if "_draft_scope_show_density" not in st.session_state:
+        st.session_state["_draft_scope_show_density"] = st.session_state["_scope_show_density"]
+    if "_draft_scope_density_group_option" not in st.session_state:
+        st.session_state["_draft_scope_density_group_option"] = st.session_state["_scope_density_group_option"]
+
     with st.sidebar:
         st.header("Filters")
-        _density_group_options = {
-            "Season": "SEASON",
-            "Intensity": "INTENSITY_NORM",
-            "Country": "COUNTRY",
-            "State/Province": "ADMIN_AREA",
-        }
-        show_density = st.toggle(
-            "Show density overlay",
-            value=st.session_state.get("_show_density_overlay", False),
-            key="_show_density_overlay",
-            help="Display semi-transparent heatmaps showing where tornado events cluster.",
-        )
-        if show_density:
-            selected_group = st.selectbox(
-                "Group density by",
-                options=list(_density_group_options.keys()),
-                key="_density_group_option",
-                help="Choose how to group events for density visualisation.",
+        with st.form("scope_filters_form", border=False):
+            st.toggle(
+                "Show density overlay",
+                key="_draft_scope_show_density",
+                help="Display semi-transparent heatmaps showing where tornado events cluster.",
             )
-            st.session_state["_density_group_by"] = _density_group_options[selected_group]
-        selected_years = st.slider(
-            "Year range",
-            min_value=OLDEST_DATASET_YEAR,
-            max_value=current_year,
-            value=(year_start, year_end),
-        )
+            if st.session_state.get("_draft_scope_show_density", False):
+                st.selectbox(
+                    "Group density by",
+                    options=list(_density_group_options.keys()),
+                    key="_draft_scope_density_group_option",
+                    help="Choose how to group events for density visualisation.",
+                )
+            st.slider(
+                "Year range",
+                min_value=OLDEST_DATASET_YEAR,
+                max_value=current_year,
+                key="_draft_scope_year_range",
+            )
+            st.multiselect(
+                "Locations",
+                options=location_options,
+                key="_draft_scope_location_tokens",
+                format_func=format_location_option,
+                help="United States and Canada are grouped in one list. Additional countries can be added later.",
+            )
+            scope_submitted = st.form_submit_button("Apply scope filters", use_container_width=True)
 
-        location_options, location_token_to_area = build_grouped_location_options(
-            COUNTRY_ADMIN_AREAS,
-            COUNTRY_REGIONS,
+    if scope_submitted:
+        st.session_state["_scope_show_density"] = bool(st.session_state.get("_draft_scope_show_density", False))
+        st.session_state["_scope_density_group_option"] = str(
+            st.session_state.get("_draft_scope_density_group_option", "Season")
         )
-        default_locations = [token for token in ["__REGION__::United States::Great Lakes"] if token in location_options]
-        selected_location_tokens = st.multiselect(
-            "Locations",
-            options=location_options,
-            default=default_locations,
-            format_func=format_location_option,
-            help="United States and Canada are grouped in one list. Additional countries can be added later.",
-        )
-        selected_location_tokens = [token for token in selected_location_tokens if token in location_token_to_area]
+        st.session_state["_scope_year_range"] = tuple(st.session_state.get("_draft_scope_year_range", (year_start, year_end)))
+        st.session_state["_scope_location_tokens"] = [
+            token
+            for token in st.session_state.get("_draft_scope_location_tokens", [])
+            if token in location_token_to_area
+        ]
+        st.session_state["_map_needs_reposition"] = True
+
+    show_density = bool(st.session_state.get("_scope_show_density", False))
+    selected_group = str(st.session_state.get("_scope_density_group_option", "Season"))
+    st.session_state["_show_density_overlay"] = show_density
+    st.session_state["_density_group_by"] = _density_group_options.get(selected_group, "SEASON")
+
+    selected_years = tuple(st.session_state.get("_scope_year_range", (year_start, year_end)))
+    selected_location_tokens = [
+        token
+        for token in st.session_state.get("_scope_location_tokens", default_locations)
+        if token in location_token_to_area
+    ]
 
     admin_areas = resolve_selected_admin_areas(selected_location_tokens, location_token_to_area)
     years = list(range(selected_years[0], selected_years[1] + 1))
     all_intensities = ["EF0", "EF1", "EF2", "EF3", "EF4", "EF5", "Unk"]
 
     # Load data and calculate available filters, even if admin_areas is empty (for responsive UI)
+    data_revision = int(st.session_state.get("_data_revision", 0))
+    need_canada = any(area in CANADIAN_PROVINCES_AND_TERRITORIES for area in admin_areas) or any(
+        1980 <= year <= 2009 for year in years
+    )
+    data_key = (tuple(years), tuple(sorted(admin_areas)), need_canada, data_revision)
+    should_show_spinner = st.session_state.get("_last_data_key") != data_key
+
     canada_warning: str | None = None
-    with st.spinner("Loading tornado history..."):
-         tornadoes = load_noaa_years(years)
-         selected_canadian_area = any(
-             area in CANADIAN_PROVINCES_AND_TERRITORIES for area in admin_areas
-         )
-         if selected_canadian_area or any(1980 <= year <= 2009 for year in years):
-             try:
-                 canada = load_canadian_tornado_data()
-                 tornadoes = pd.concat([tornadoes, canada], ignore_index=True)
-             except Exception as error:
-                 canada_warning = (
-                     "Canadian data could not be loaded in this environment. "
-                     f"Continuing with NOAA data only. Details: {error}"
-                 )
+    ctx = st.spinner("Loading tornado history...") if should_show_spinner else nullcontext()
+    with ctx:
+        tornadoes = load_noaa_years_cached(tuple(years), data_revision).copy()
+        if need_canada:
+            try:
+                canada = load_canadian_tornado_data_cached(data_revision)
+                tornadoes = pd.concat([tornadoes, canada], ignore_index=True)
+            except Exception as error:
+                canada_warning = (
+                    "Canadian data could not be loaded in this environment. "
+                    f"Continuing with NOAA data only. Details: {error}"
+                )
+    st.session_state["_last_data_key"] = data_key
 
     # Normalise intensity values so EF-prefixed and F-prefixed both match checkboxes
     tornadoes["INTENSITY_NORM"] = tornadoes["INTENSITY"].apply(normalise_intensity)
@@ -2063,76 +2134,79 @@ def main() -> None:
     available_intensities = set(availability_source["INTENSITY_NORM"].dropna().astype(str).tolist())
 
     default_months = list(MONTH_NAMES.keys())
-    if "selected_months" not in st.session_state:
-         st.session_state["selected_months"] = default_months.copy()
+    default_seasons = list(SEASON_MONTHS.keys())
+    default_intensities = ["EF3", "EF4", "EF5"]
+
+    if "_detail_selected_months" not in st.session_state:
+        st.session_state["_detail_selected_months"] = default_months.copy()
+    if "_detail_selected_seasons" not in st.session_state:
+        st.session_state["_detail_selected_seasons"] = default_seasons.copy()
+    if "_detail_selected_intensities" not in st.session_state:
+        st.session_state["_detail_selected_intensities"] = default_intensities.copy()
+
     for month in MONTH_NAMES:
-         month_key = f"month_{month}"
-         if month_key not in st.session_state:
-             st.session_state[month_key] = month in set(st.session_state["selected_months"])
-    for season, months in SEASON_MONTHS.items():
-         season_key = f"season_{season}"
-         if season_key not in st.session_state:
-             st.session_state[season_key] = any(month in set(st.session_state["selected_months"]) for month in months)
+        draft_key = f"_draft_month_{month}"
+        if draft_key not in st.session_state:
+            st.session_state[draft_key] = month in set(st.session_state["_detail_selected_months"])
+    for season in SEASON_MONTHS:
+        draft_key = f"_draft_season_{season}"
+        if draft_key not in st.session_state:
+            st.session_state[draft_key] = season in set(st.session_state["_detail_selected_seasons"])
     for label in all_intensities:
-         intensity_key = f"ef_{label}"
-         if intensity_key not in st.session_state:
-             st.session_state[intensity_key] = label in {"EF3", "EF4", "EF5"}
+        draft_key = f"_draft_intensity_{label}"
+        if draft_key not in st.session_state:
+            st.session_state[draft_key] = label in set(st.session_state["_detail_selected_intensities"])
 
-    # Render filter UI in sidebar (always visible, even if admin_areas is empty)
+    # Render detail filters in a form to avoid reruns on every checkbox click.
     with st.sidebar:
-         st.markdown("**Months**")
-         month_cols = st.columns(3)
-         selected_month_numbers: list[int] = []
-         for idx, month in enumerate(MONTH_NAMES):
-             month_key = f"month_{month}"
-             is_available = month in available_months
-             month_label = MONTH_ABBR[month] if is_available else f":gray[{MONTH_ABBR[month]}]"
-             checked = month_cols[idx % 3].checkbox(
-                 month_label,
-                 key=month_key,
-                 on_change=sync_months_from_month_checks,
-             )
-             if checked:
-                 selected_month_numbers.append(month)
-         st.session_state["selected_months"] = sorted(selected_month_numbers)
-         sync_seasons_from_months()
+        with st.form("detail_filters_form", border=False):
+            st.markdown("**Months**")
+            month_cols = st.columns(3)
+            for idx, month in enumerate(MONTH_NAMES):
+                is_available = month in available_months
+                month_label = MONTH_ABBR[month] if is_available else f":gray[{MONTH_ABBR[month]}]"
+                month_cols[idx % 3].checkbox(month_label, key=f"_draft_month_{month}")
 
-         st.markdown("**Season**")
-         season_list = list(SEASON_MONTHS)
-         selected_seasons: list[str] = []
-         for row_start in range(0, len(season_list), 2):
-             row_cols = st.columns(2)
-             for col_idx, season in enumerate(season_list[row_start:row_start + 2]):
-                 season_available = any(month in available_months for month in SEASON_MONTHS[season])
-                 season_key = f"season_{season}"
-                 label = (
-                     f"{SEASON_ICONS[season]} {season}"
-                     if season_available
-                     else f":gray[{SEASON_ICONS[season]} {season}]"
-                 )
-                 if row_cols[col_idx].checkbox(
-                     label,
-                     key=season_key,
-                     on_change=sync_months_from_seasons,
-                 ):
-                     selected_seasons.append(season)
+            st.markdown("**Season**")
+            season_list = list(SEASON_MONTHS)
+            for row_start in range(0, len(season_list), 2):
+                row_cols = st.columns(2)
+                for col_idx, season in enumerate(season_list[row_start:row_start + 2]):
+                    season_available = any(month in available_months for month in SEASON_MONTHS[season])
+                    label = (
+                        f"{SEASON_ICONS[season]} {season}"
+                        if season_available
+                        else f":gray[{SEASON_ICONS[season]} {season}]"
+                    )
+                    row_cols[col_idx].checkbox(label, key=f"_draft_season_{season}")
 
-         season_months: list[int] = []
-         for season in (selected_seasons if selected_seasons else list(SEASON_MONTHS)):
-             season_months.extend(SEASON_MONTHS[season])
+            st.markdown("**Intensity**")
+            intensity_cols = st.columns(3)
+            for i, label in enumerate(all_intensities):
+                is_available = label in available_intensities
+                intensity_label = label if is_available else f":gray[{label}]"
+                intensity_cols[i % 3].checkbox(intensity_label, key=f"_draft_intensity_{label}")
 
-         st.markdown("**Intensity**")
-         selected_intensities: list[str] = []
-         intensity_cols = st.columns(3)
-         for i, label in enumerate(all_intensities):
-             intensity_key = f"ef_{label}"
-             is_available = label in available_intensities
-             intensity_label = label if is_available else f":gray[{label}]"
-             if intensity_cols[i % 3].checkbox(
-                 intensity_label,
-                 key=intensity_key,
-             ):
-                 selected_intensities.append(label)
+            detail_submitted = st.form_submit_button("Apply detail filters", use_container_width=True)
+
+    if detail_submitted:
+        st.session_state["_detail_selected_months"] = [
+            month for month in MONTH_NAMES if st.session_state.get(f"_draft_month_{month}", False)
+        ]
+        st.session_state["_detail_selected_seasons"] = [
+            season for season in SEASON_MONTHS if st.session_state.get(f"_draft_season_{season}", False)
+        ]
+        st.session_state["_detail_selected_intensities"] = [
+            label for label in all_intensities if st.session_state.get(f"_draft_intensity_{label}", False)
+        ]
+
+    selected_month_numbers: list[int] = list(st.session_state.get("_detail_selected_months", default_months))
+    selected_seasons: list[str] = list(st.session_state.get("_detail_selected_seasons", default_seasons))
+    selected_intensities: list[str] = list(st.session_state.get("_detail_selected_intensities", default_intensities))
+
+    season_months: list[int] = []
+    for season in (selected_seasons if selected_seasons else list(SEASON_MONTHS)):
+        season_months.extend(SEASON_MONTHS[season])
 
     # Early return: stop processing if no locations are selected (but filters remain visible)
     if not admin_areas:
@@ -2163,7 +2237,8 @@ def main() -> None:
         tuple(sorted(years)),
         tuple(sorted(intensity_filter_values)),
     )
-    if st.session_state.get("_filter_key") != filter_key:
+    filters_changed = st.session_state.get("_filter_key") != filter_key
+    if filters_changed:
         st.session_state["_filter_key"] = filter_key
         map_state = st.session_state.get("tornado_map")
         if isinstance(map_state, dict):
@@ -2264,6 +2339,7 @@ def main() -> None:
                         _conn.execute("DELETE FROM fetch_log")
                 except Exception:
                     pass
+                st.session_state["_data_revision"] = int(st.session_state.get("_data_revision", 0)) + 1
                 st.toast("Cache invalidated. Data will refresh on the next filter change.", icon="✅")
 
     previous_display_row_ids = st.session_state.get("_table_display_row_ids")
@@ -2310,13 +2386,16 @@ def main() -> None:
     debounce_seconds = float(temp_debounce_seconds)
 
     now_ts = time.time()
-    bounds_sig = tuple(round(value, 4) for value in map_bounds) if map_bounds is not None else None
+    bounds_sig = tuple(round(value, 3) for value in map_bounds) if map_bounds is not None else None
     if st.session_state.get("_temp_bounds_sig") != bounds_sig:
         st.session_state["_temp_bounds_sig"] = bounds_sig
         st.session_state["_temp_bounds_changed_at"] = now_ts
     changed_at = float(st.session_state.get("_temp_bounds_changed_at", now_ts))
     seconds_since_change = max(0.0, now_ts - changed_at)
     bounds_stable = map_bounds is None or seconds_since_change >= debounce_seconds
+    temp_refresh_needed = bool(filters_changed) or (
+        bounds_stable and st.session_state.get("_temp_last_processed_sig") != bounds_sig
+    )
 
     if map_bounds is not None:
         south, west, north, east = map_bounds
@@ -2348,7 +2427,7 @@ def main() -> None:
     already_cached = filtered["TEMP_HIGH_C"].notna()
     rows_needing_fetch = temp_source_df[~already_cached.loc[temp_source_df.index]]
 
-    if not rows_needing_fetch.empty and bounds_stable:
+    if not rows_needing_fetch.empty and temp_refresh_needed:
         fetch_df = rows_needing_fetch[["BEGIN_LAT", "BEGIN_LON", "COUNTRY", "BEGIN_DATE_TIME"]].copy()
         fetch_df["_lat_r"] = fetch_df["BEGIN_LAT"].round(0)
         fetch_df["_lon_r"] = fetch_df["BEGIN_LON"].round(0)
@@ -2405,6 +2484,9 @@ def main() -> None:
             f"Temperature checks paused while map view changes. "
             f"Waiting {remaining_seconds:.1f}s for viewport to settle."
         )
+
+    if temp_refresh_needed and bounds_stable:
+        st.session_state["_temp_last_processed_sig"] = bounds_sig
 
     # Build formatted display strings from the (now-populated) celsius columns.
     loaded_count = 0
