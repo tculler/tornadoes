@@ -2521,10 +2521,15 @@ def main() -> None:
 
     persisted_view = st.session_state.get("_map_view_state")
     if persisted_view is None:
-        persisted_view = find_map_view_state(
+        inferred_view = find_map_view_state(
             st.session_state.get("tornado_map", {}),
             allow_bounds_fallback=True,
         )
+        if inferred_view is not None:
+            known_zoom = st.session_state.get("_map_zoom_level")
+            if known_zoom is not None:
+                inferred_view = (inferred_view[0], inferred_view[1], float(known_zoom))
+        persisted_view = inferred_view
 
     fmap, view_lat, view_lon, view_zoom = build_map(
         filtered,
@@ -2536,6 +2541,7 @@ def main() -> None:
         show_density_overlay=st.session_state.get("_show_density_overlay", False),
         density_group_by=st.session_state.get("_density_group_by"),
     )
+    st.session_state.setdefault("_map_zoom_level", float(view_zoom))
     _needs_pos = st.session_state.get("_map_needs_reposition", True)
     _st_folium_kwargs: dict = {
         "key": "tornado_map_widget",
@@ -2549,11 +2555,22 @@ def main() -> None:
         st.session_state["_map_needs_reposition"] = False
     map_event = st_folium(fmap, **_st_folium_kwargs)
     if isinstance(map_event, dict):
+        explicit_zoom = map_event.get("zoom")
+        if explicit_zoom is not None:
+            try:
+                st.session_state["_map_zoom_level"] = float(explicit_zoom)
+            except (TypeError, ValueError):
+                pass
+
         new_click = map_event.get("last_object_clicked")
         if new_click is not None:
             st.session_state["_last_clicked_raw"] = new_click
 
         event_view = find_map_view_state(map_event, allow_bounds_fallback=True)
+        if event_view is not None and explicit_zoom is None:
+            known_zoom = st.session_state.get("_map_zoom_level")
+            if known_zoom is not None:
+                event_view = (event_view[0], event_view[1], float(known_zoom))
         if event_view is not None:
             old_view = st.session_state.get("_map_view_state")
             if old_view is None or (
@@ -2562,6 +2579,7 @@ def main() -> None:
                 or abs(event_view[2] - old_view[2]) > 0.05
             ):
                 st.session_state["_map_view_state"] = event_view
+                st.session_state["_map_zoom_level"] = float(event_view[2])
 
         st.session_state["tornado_map"] = map_event
 
