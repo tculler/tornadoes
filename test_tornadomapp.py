@@ -32,6 +32,7 @@ Run with:  python -m pytest test_tornadomapp.py -v
 # ---------------------------------------------------------------------------
 from __future__ import annotations
 
+import gzip
 import sys
 import types
 from unittest.mock import MagicMock
@@ -858,3 +859,99 @@ class TestFetchRemoteCsvEncoding:
         with patch("tornadomapp.requests.get", return_value=mock_resp):
             with pytest.raises(ValueError, match="HTML"):
                 app.fetch_remote_csv("http://example.com/data.csv")
+
+
+# ---------------------------------------------------------------------------
+# load_noaa_tornado_data / load_noaa_years – malformed source data recovery
+# ---------------------------------------------------------------------------
+def _gzip_csv_response(csv_text: str) -> MagicMock:
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status.return_value = None
+    mock_resp.content = gzip.compress(csv_text.encode("utf-8"))
+    return mock_resp
+
+
+class TestLoadNoaaTornadoDataMalformedSource:
+    """NOAA yearly files that don't match the expected schema should fail
+    predictably (a clear ValueError) or degrade gracefully, never crash with
+    an opaque KeyError deep in pandas."""
+
+    def _patch_common(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(app, "DB_PATH", tmp_path / "t.db")
+        monkeypatch.setattr(app, "get_year_download_url", lambda year: "http://example.com/fake.csv.gz")
+        monkeypatch.setattr(app, "resolve_us_county_name", lambda *_a: None)
+
+    def test_missing_required_column_raises_clear_error(self, tmp_path, monkeypatch):
+        self._patch_common(monkeypatch, tmp_path)
+        csv_text = (
+            "YEAR,MONTH_NAME,BEGIN_DATE_TIME,END_DATE_TIME,EVENT_TYPE,BEGIN_LAT,BEGIN_LON\n"
+            "2020,May,04-MAY-20 14:30:00,04-MAY-20 15:00:00,Tornado,35.0,-97.0\n"
+        )
+        with patch("tornadomapp.requests.get", return_value=_gzip_csv_response(csv_text)):
+            with pytest.raises(ValueError, match="STATE"):
+                app.load_noaa_tornado_data(2020)
+
+    def test_non_csv_content_raises_clear_error(self, tmp_path, monkeypatch):
+        self._patch_common(monkeypatch, tmp_path)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.content = b"this is not a gzip file at all"
+        with patch("tornadomapp.requests.get", return_value=mock_resp):
+            with pytest.raises(ValueError, match="could not be parsed"):
+                app.load_noaa_tornado_data(2020)
+
+    def test_missing_optional_columns_default_gracefully(self, tmp_path, monkeypatch):
+        """A source file with only the required columns (no F-scale, county,
+        narrative, or end-point fields) should still load without crashing."""
+        self._patch_common(monkeypatch, tmp_path)
+        csv_text = (
+            "STATE,YEAR,MONTH_NAME,BEGIN_DATE_TIME,END_DATE_TIME,EVENT_TYPE,BEGIN_LAT,BEGIN_LON\n"
+            "Texas,2020,May,04-MAY-20 14:30:00,04-MAY-20 15:00:00,Tornado,35.0,-97.0\n"
+        )
+        with patch("tornadomapp.requests.get", return_value=_gzip_csv_response(csv_text)):
+            result = app.load_noaa_tornado_data(2020)
+        assert len(result) == 1
+        row = result.iloc[0]
+        assert row["INTENSITY"] == "Unknown"
+        assert row["AREA_NAME"] == "Unknown area"
+        assert pd.isna(row["TRACK_LENGTH"])
+        assert row["END_LAT"] == row["BEGIN_LAT"]
+        assert row["END_LON"] == row["BEGIN_LON"]
+
+    def test_empty_file_returns_empty_frame(self, tmp_path, monkeypatch):
+        self._patch_common(monkeypatch, tmp_path)
+        csv_text = "STATE,YEAR,MONTH_NAME,BEGIN_DATE_TIME,END_DATE_TIME,EVENT_TYPE,BEGIN_LAT,BEGIN_LON\n"
+        with patch("tornadomapp.requests.get", return_value=_gzip_csv_response(csv_text)):
+            result = app.load_noaa_tornado_data(2020)
+        assert result.empty
+        assert list(result.columns) == app.NORMALIZED_COLUMNS
+
+
+class TestLoadNoaaYearsRecovery:
+    """One malformed/unavailable year should not prevent other requested
+    years from loading."""
+
+    def test_skips_bad_year_and_returns_good_years(self, monkeypatch):
+        def fake_loader(year):
+            if year == 2021:
+                raise ValueError("NOAA data for 2021 is missing required column(s): STATE")
+            return _single_row_frame(year)
+
+        monkeypatch.setattr(app, "load_noaa_tornado_data", fake_loader)
+        result = app.load_noaa_years([2020, 2021, 2022])
+        assert sorted(result["YEAR"].tolist()) == [2020, 2022]
+
+    def test_all_years_bad_returns_empty_frame(self, monkeypatch):
+        def always_fails(year):
+            raise ValueError("boom")
+
+        monkeypatch.setattr(app, "load_noaa_tornado_data", always_fails)
+        result = app.load_noaa_years([2020, 2021])
+        assert result.empty
+        assert list(result.columns) == app.NORMALIZED_COLUMNS
+
+
+def _single_row_frame(year: int) -> pd.DataFrame:
+    row = {column: None for column in app.NORMALIZED_COLUMNS}
+    row["YEAR"] = year
+    return pd.DataFrame([row])

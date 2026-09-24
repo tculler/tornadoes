@@ -18,8 +18,14 @@ from __future__ import annotations
 #          editing, cached multi-year/Canada loads, conditional loading
 #          spinner display, and viewport-signature gating for temperature
 #          refresh work while panning/zooming.
+# v1.4  – Hardened NOAA yearly loading against malformed/changed source
+#          schemas: optional columns default instead of raising KeyError,
+#          missing required columns raise a clear message, a bad single year
+#          no longer aborts the whole multi-year load, and a top-level
+#          fallback (mirroring the existing Canada path) keeps the app
+#          running with a warning instead of crashing.
 # ---------------------------------------------------------------------------
-__version__ = "1.3"
+__version__ = "1.4"
 # ---------------------------------------------------------------------------
 
 import calendar
@@ -323,6 +329,20 @@ NOAA_COLUMNS = [
     "END_LON",
     "EPISODE_NARRATIVE",
     "EVENT_NARRATIVE",
+]
+# Columns without which a NOAA yearly file cannot be safely interpreted at all.
+# Everything else in NOAA_COLUMNS is treated as optional and defaulted if absent,
+# so a source schema change (renamed/dropped optional field) degrades gracefully
+# instead of crashing the whole load.
+NOAA_REQUIRED_COLUMNS = [
+    "STATE",
+    "YEAR",
+    "MONTH_NAME",
+    "BEGIN_DATE_TIME",
+    "END_DATE_TIME",
+    "EVENT_TYPE",
+    "BEGIN_LAT",
+    "BEGIN_LON",
 ]
 NORMALIZED_COLUMNS = [
     "COUNTRY",
@@ -911,12 +931,35 @@ def load_noaa_tornado_data(year: int) -> pd.DataFrame:
     response = requests.get(url, timeout=120)
     response.raise_for_status()
 
-    dataframe = pd.read_csv(
-        BytesIO(response.content),
-        compression="gzip",
-        low_memory=False,
-        usecols=NOAA_COLUMNS,
-    )
+    try:
+        dataframe = pd.read_csv(
+            BytesIO(response.content),
+            compression="gzip",
+            low_memory=False,
+            usecols=lambda column: column in NOAA_COLUMNS,
+        )
+    except (pd.errors.ParserError, UnicodeDecodeError, EOFError, OSError) as error:
+        raise ValueError(f"NOAA data for {year} could not be parsed as CSV: {error}") from error
+
+    missing_required = [column for column in NOAA_REQUIRED_COLUMNS if column not in dataframe.columns]
+    if missing_required:
+        raise ValueError(
+            f"NOAA data for {year} is missing required column(s): {', '.join(missing_required)}"
+        )
+    # Optional columns are defaulted to NA when the source schema omits them,
+    # rather than raising a KeyError deep in downstream processing.
+    for optional_column in ("TOR_F_SCALE", "TOR_LENGTH", "TOR_WIDTH", "CZ_NAME",
+                             "BEGIN_LOCATION", "END_LAT", "END_LON",
+                             "EPISODE_NARRATIVE", "EVENT_NARRATIVE"):
+        if optional_column not in dataframe.columns:
+            dataframe[optional_column] = pd.NA
+
+    if dataframe.empty:
+        result = empty_normalized_frame()
+        _write_noaa_to_db(year, result)
+        _set_fetch_log("noaa", str(year))
+        return result
+
     dataframe = dataframe.loc[dataframe["EVENT_TYPE"] == "Tornado"].copy()
     dataframe["BEGIN_DATE_TIME"] = pd.to_datetime(
         dataframe["BEGIN_DATE_TIME"],
@@ -998,7 +1041,15 @@ def load_noaa_tornado_data(year: int) -> pd.DataFrame:
 
 
 def load_noaa_years(years: Iterable[int]) -> pd.DataFrame:
-    frames = [load_noaa_tornado_data(year) for year in years]
+    frames = []
+    for year in years:
+        try:
+            frames.append(load_noaa_tornado_data(year))
+        except Exception as error:
+            # A single malformed/unavailable year should not prevent the other
+            # requested years from loading; skip it and keep going.
+            print(f"Warning: NOAA data for {year} could not be loaded: {error}")
+            continue
     if not frames:
         return empty_normalized_frame()
     return pd.concat(frames, ignore_index=True)
@@ -2088,10 +2139,18 @@ def main() -> None:
     data_key = (tuple(years), tuple(sorted(admin_areas)), need_canada, data_revision)
     should_show_spinner = st.session_state.get("_last_data_key") != data_key
 
+    noaa_warning: str | None = None
     canada_warning: str | None = None
     ctx = st.spinner("Loading tornado history...") if should_show_spinner else nullcontext()
     with ctx:
-        tornadoes = load_noaa_years_cached(tuple(years), data_revision).copy()
+        try:
+            tornadoes = load_noaa_years_cached(tuple(years), data_revision).copy()
+        except Exception as error:
+            tornadoes = empty_normalized_frame()
+            noaa_warning = (
+                "NOAA data could not be loaded in this environment. "
+                f"Continuing without NOAA data. Details: {error}"
+            )
         if need_canada:
             try:
                 canada = load_canadian_tornado_data_cached(data_revision)
@@ -2249,6 +2308,9 @@ def main() -> None:
         st.session_state["_map_needs_reposition"] = True
         st.session_state.pop("_last_clicked_raw", None)
         st.session_state.pop("_map_view_state", None)
+
+    if noaa_warning:
+        st.warning(noaa_warning)
 
     if canada_warning:
         st.warning(canada_warning)
