@@ -22,10 +22,12 @@ A Streamlit app that displays historical tornado tracks on an interactive map us
 ```powershell
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
-streamlit run tornadomapp.py
+python -m streamlit run tornadomapp.py
 ```
 
 The app opens at `http://localhost:8501`. Data is downloaded from NOAA on first use and cached locally; subsequent loads are near-instant.
+
+> ⚠️ Always launch via Streamlit's runner (`python -m streamlit run tornadomapp.py`), never `python tornadomapp.py`. Running it as a plain script executes it once in "bare mode" with no server, produces no UI, and floods the console with harmless `missing ScriptRunContext!` warnings. If the bare `streamlit` command isn't recognized (`CommandNotFoundException`), use `python -m streamlit run ...` instead — this happens when the Python Scripts directory isn't on PATH.
 
 ## Sidebar controls
 

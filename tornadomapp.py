@@ -2593,23 +2593,59 @@ def main() -> None:
                 inferred_view = (inferred_view[0], inferred_view[1], float(known_zoom))
         persisted_view = inferred_view
 
-    fmap, view_lat, view_lon, view_zoom = build_map(
-        filtered,
-        selected_rows=selected_idxs,
-        map_state=st.session_state.get("_last_map_state_for_view", st.session_state.get("tornado_map", {})),
-        persisted_view=persisted_view,
-        map_height=map_height,
-        max_map_rows=max_map_rows,
-        show_density_overlay=st.session_state.get("_show_density_overlay", False),
-        density_group_by=st.session_state.get("_density_group_by"),
-    )
-    st.session_state.setdefault("_map_zoom_level", float(view_zoom))
     _needs_pos = st.session_state.get("_map_needs_reposition", True)
+    # Only adopt the live/current view as the map's *baked-in* starting
+    # location on a forced reposition (first load or filter change). Baking
+    # the ever-changing live view into the Folium map on every rerun alters
+    # the generated HTML, which streamlit-folium treats as a brand-new
+    # component instance — remounting the iframe mid-zoom/pan (visible flash)
+    # and snapping back to the one-render-stale zoom/center.
+    if _needs_pos or "_map_baked_view" not in st.session_state:
+        baked_view = persisted_view
+        st.session_state["_map_baked_view"] = baked_view
+    else:
+        baked_view = st.session_state["_map_baked_view"]
+
+    _map_build_fingerprint = (
+        filter_key,
+        tuple(sorted(selected_idxs)),
+        baked_view,
+        map_height,
+        max_map_rows,
+        st.session_state.get("_show_density_overlay", False),
+        st.session_state.get("_density_group_by"),
+    )
+    _cached_build = st.session_state.get("_map_build_cache")
+    if _cached_build is not None and _cached_build[0] == _map_build_fingerprint:
+        fmap, view_lat, view_lon, view_zoom = _cached_build[1]
+    else:
+        fmap, view_lat, view_lon, view_zoom = build_map(
+            filtered,
+            selected_rows=selected_idxs,
+            map_state=st.session_state.get("_last_map_state_for_view", st.session_state.get("tornado_map", {})),
+            persisted_view=baked_view,
+            map_height=map_height,
+            max_map_rows=max_map_rows,
+            show_density_overlay=st.session_state.get("_show_density_overlay", False),
+            density_group_by=st.session_state.get("_density_group_by"),
+        )
+        st.session_state["_map_build_cache"] = (
+            _map_build_fingerprint,
+            (fmap, view_lat, view_lon, view_zoom),
+        )
+    st.session_state.setdefault("_map_zoom_level", float(view_zoom))
+    # streamlit-folium re-fires moveend/zoomend as part of its own mount-time
+    # view initialization, and every Streamlit rerun remounts the component's
+    # iframe. Listening for "zoom"/"center"/"bounds" therefore turns each
+    # mount's own init events into a *new* widget value, which triggers
+    # another rerun, another remount, another init event... forever. Only
+    # "last_object_clicked" reflects a genuine user action, so that's the
+    # only value we read back.
     _st_folium_kwargs: dict = {
         "key": "tornado_map_widget",
         "height": map_height,
         "use_container_width": True,
-        "returned_objects": ["zoom", "center", "bounds", "last_object_clicked"],
+        "returned_objects": ["last_object_clicked"],
     }
     if _needs_pos:
         _st_folium_kwargs["center"] = (view_lat, view_lon)
